@@ -24,9 +24,6 @@ import warnings
 warnings.filterwarnings("ignore")
 RUN_EXAMPLES = True
 
-# def is__interactive_notebook():
-#     return __name__ == "__main__"
-
 def show_example(fn, args=[]):
     if __name__ == "__main__" and RUN_EXAMPLES:
         return fn(*args)
@@ -81,6 +78,8 @@ class Generator(nn.Module):
     
     def forward(self, x):
         return log_softmax(self.proj(x), dim=-1)
+
+# Encoder
 
 def clones(module, N):
     "Produce N identical layers."
@@ -144,6 +143,8 @@ class EncoderLayer(nn.Module):
         x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))
         return self.sublayer[1](x, self.feed_forward)
     
+# Decoder
+
 class Decoder(nn.Module):
     "Generic N layer decoder with masking."
 
@@ -173,6 +174,8 @@ class DecoderLayer(nn.Module):
         x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, tgt_mask))
         x = self.sublayer[1](x, lambda x: self.src_attn(x, m, m, src_mask))
         return self.sublayer[2](x, self.feed_forward)
+
+# Attention
 
 def attention(query, key, value, mask=None, dropout=None):
     "Compute 'Scaled Dot Product Attention'"
@@ -229,6 +232,8 @@ class MultiHeadedAttention(nn.Module):
         del value
         return self.linears[-1](x)
 
+# Position-wise Feed-Forward Network
+
 class PositionwiseFeedForward(nn.Module):
     "Implements FFN equation."
 
@@ -240,7 +245,9 @@ class PositionwiseFeedForward(nn.Module):
 
     def forward(self, x):
         return self.w_2(self.dropout(self.w_1(x).relu()))
-    
+
+# Embedding and Softmax
+
 class Embeddings(nn.Module):
     def __init__(self, d_model, vocab):
         super(Embeddings, self).__init__()
@@ -249,6 +256,8 @@ class Embeddings(nn.Module):
 
     def forward(self, x):
         return self.lut(x) * math.sqrt(self.d_model)
+
+# Positional Encoding
 
 class PositionalEncoding(nn.Module):
     "Implement the PE function."
@@ -277,7 +286,9 @@ def subsequent_mask(size):
     attn_shape = (1, size, size)
     subsequent_mask = torch.triu(torch.ones(attn_shape), diagonal=1).type(torch.uint8)
     return subsequent_mask == 0
-    
+
+# Full Model
+
 def make_model(
         src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8, dropout=0.1
 ):
@@ -299,6 +310,8 @@ def make_model(
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)
     return model
+
+# Inference
 
 def inference_test():
     test_model = make_model(11, 11, 2)
@@ -327,3 +340,125 @@ def run_tests():
         inference_test()
 
 # show_example(run_tests)
+
+# Batches and Masking
+
+class Batch:
+    """Object for holding a batch of data with mask during training."""
+    def __init__(self, src, tgt=None, pad=2): # 2 = <blank>
+        self.src = src
+        self.src_mask = (src != pad).unsqueeze(-2)
+        if tgt is not None:
+            self.tgt = tgt[:, :-1]
+            self.tgt_y = tgt[:, 1:]
+            self.tgt_mask = self.make_std_mask(self.tgt, pad)
+            self.ntokens = (self.tgt_y != pad).data.sum()
+
+    @staticmethod
+    def make_std_mask(tgt, pad):
+        """Create a mask to hide padding and future words."""
+        tgt_mask = (tgt != pad).unsqueeze(-2) # transformer expects mask to have 3 dimensions
+        tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(tgt_mask.data) # bitwise AND
+        return tgt_mask
+
+# Training Loop
+
+class TrainState:
+    """Track number of steps, examples, and toeksn processed"""
+    step: int = 0 # Steps in the current epoch
+    accum_step: int = 0 # Number of gradient accumulation steps
+    samples: int = 0 # total number of examples used
+    tokens: int = 0 # total number of tokens processed
+
+def run_epoch(
+    data_iter,
+    model,
+    loss_compute,
+    optimizer,
+    scheduler,
+    mode="train",
+    accum_iter=1,
+    train_state=TrainState(),
+):
+    """Train a single epoch"""
+    start = time.time()
+    total_tokens = 0
+    total_loss = 0
+    tokens = 0
+    n_accum = 0
+    for i, batch in enumerate(data_iter):
+        out = model.forward(
+            batch.src, batch.tgt, batch.src_mask, batch.tgt_mask
+        )
+        loss, loss_node = loss_compute(out, batch.tgt_y, batch.ntokens)
+        
+        if mode == "train" or mode == "train+log":
+            loss_node.backward()
+            train_state.step += 1
+            train_state.samples += batch.src.shape[0]
+            train_state.tokens += batch.ntokens
+            if i % accum_iter == 0:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                n_accum += 1
+                train_state.accum_step += 1
+            scheduler.step()
+        
+        total_loss += loss
+        total_tokens += batch.ntokens
+        tokens += batch.ntokens
+        if i % 40 == 1 and (mode == "train" or mode == "train+log"):
+            lr = optimizer.param_groups[0]["lr"]
+            elapsed = time.time() - start
+            print(
+                (
+                    "Epoch Step: %6d | Accumulation Step: %3d | Loss: %6.2f"
+                    + "| Tokens / Sec: %7.1f | Learning Rate: %6.1e"
+                )
+                % (i, n_accum, loss / batch.ntokens, tokens / elapsed, lr)
+            )
+            start = time.time()
+            tokens = 0
+        del loss
+        del loss_node
+
+    return total_loss / total_tokens, train_state
+
+#
+
+def rate(step, model_size, factor, warmup):
+    """
+    we have to default the step to 1 for LamdaLR function
+    to avoid zero raising to negative power
+    """
+    if step == 0:
+        step = 1
+    return factor * (
+        model_size ** (-0.5) * min(step ** (-0.5), step * warmup ** (-1.5))
+    )
+
+# Regularization
+
+class LabelSmoothing(nn.Module):
+    "Implement Label smoothing"
+
+    def __init__(self, size, padding_idx, smoothing=0.0):
+        super(LabelSmoothing, self).__init__()
+        self.criterion = nn.KLDivLoss(reduction="sum")
+        self.padding_idx = padding_idx
+        self.confidence = 1.0 - smoothing
+        self.smoothing = smoothing
+        self.size = size
+        self.true_dist = None
+
+    def forward(self, x, target):
+        assert x.size(1) == self.size
+        true_dist = x.data.clone()
+        true_dist.fill_(self.smoothing / (self.size - 2))
+        true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
+        true_dist[:, self.padding_idx] = 0
+        mask = torch.nonzero(target.data == self.padding_idx)
+        if mask.dim() > 0:
+            true_dist.index_fill_(0, mask.squeeze(), 0.0)
+        self.true_dist = true_dist
+        return self.criterion(x, true_dist.clone().detach())
