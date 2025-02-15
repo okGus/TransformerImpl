@@ -454,11 +454,23 @@ class LabelSmoothing(nn.Module):
     def forward(self, x, target):
         assert x.size(1) == self.size
         true_dist = x.data.clone()
+        # initialize with small smoothing value before modifying it further
         true_dist.fill_(self.smoothing / (self.size - 2))
+        # scatter_(dim, index, src), writes values from src into self at indices specified in index along dim
         true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
         true_dist[:, self.padding_idx] = 0
-        mask = torch.nonzero(target.data == self.padding_idx)
+        mask = torch.nonzero(target.data == self.padding_idx) # finds indices where target == padding_idx
         if mask.dim() > 0:
+            # index_fill_(dim, index, value)
+            # fills elements at given index along dim with value
             true_dist.index_fill_(0, mask.squeeze(), 0.0)
         self.true_dist = true_dist
         return self.criterion(x, true_dist.clone().detach())
+    
+def loss(x, crit):
+    d = x + 3 * 1
+    predict = torch.FloatTensor([[0, x / d, 1 / d, 1 / d, 1 / d]])
+    return crit(predict.log(), torch.LongTensor([1])).data
+
+# A First Example
+
