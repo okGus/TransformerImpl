@@ -474,3 +474,14 @@ def loss(x, crit):
 
 # A First Example
 
+# Synthetic Data
+def data_gen(V, batch_size, nbatches):
+    "Generate random data for a src-tgt copy task."
+    for i in range(nbatches):
+        # create random integer tensor of shape (batch_size, 10)
+        # where values are sampled from [1, V-1]
+        data = torch.randint(1, V, size=(batch_size, 10))
+        data[:, 0] = 1
+        src = data.requires_grad_(False).clone().detach()
+        tgt = data.requires_grad_(False).clone().detach()
+        yield Batch(src, tgt, 0)
