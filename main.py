@@ -28,9 +28,9 @@ def show_example(fn, args=[]):
     if __name__ == "__main__" and RUN_EXAMPLES:
         return fn(*args)
     
-# def exectue_example(fn, args=[]):
-#     if __name__ == "__main__" and RUN_EXAMPLES:
-#         fn(*args)
+def exectue_example(fn, args=[]):
+    if __name__ == "__main__" and RUN_EXAMPLES:
+        fn(*args)
 
 class DummyOptimizer(torch.optim.Optimizer):
     def __init__(self):
@@ -485,3 +485,38 @@ def data_gen(V, batch_size, nbatches):
         src = data.requires_grad_(False).clone().detach()
         tgt = data.requires_grad_(False).clone().detach()
         yield Batch(src, tgt, 0)
+
+# Loss Computation
+class SimpleLossCompute:
+    "A simple loss compute and train function"
+    def __init__(self, generator, criterion):
+        self.generator = generator
+        self.criterion = criterion
+
+    def __call__(self, x, y, norm):
+        x = self.generator(x)
+        l = (
+            self.criterion(
+                x.contiguous().view(-1, x.size(-1)),
+                y.contiguous().view(-1),
+            ) / norm
+        )
+        return l.data * norm, l
+
+# Greedy Decoding
+def greedy_decode(model, src, src_mask, max_len, start_symbol):
+    memory = model.encode(src, src_mask)
+    ys = torch.zeros(1, 1).fill_(start_symbol).type_as(src.data)
+    for i in range(max_len - 1):
+        out = model.decode(
+            memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
+        )
+        prob = model.generator(out[:, -1])
+        _, next_word = torch.max(prob, dim=1)
+        next_word = next_word.data[0]
+        ys = torch.cat(
+            [ys, torch.zeros(1, 1).type_as(src.data).fill_(next_word)], dim=1
+        )
+        return ys
+    
+# Train the simple copy task
