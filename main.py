@@ -1,17 +1,18 @@
+import torchtext; torchtext.disable_torchtext_deprecation_warning() # last version is 0.18 and is deprecated
 import os
 from os.path import exists
 import torch
 import torch.nn as nn
 from torch.nn.functional import log_softmax, pad
 from torch.optim.lr_scheduler import LambdaLR
-# from torchtext.data.functional import to_map_style_dataset
+from torchtext.data.functional import to_map_style_dataset
 from torch.utils.data import DataLoader
-# from torchtext.vocab import build_vocab_from_iterator
+from torchtext.vocab import build_vocab_from_iterator
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
-# import torchtext.datasets as datasets
+import torchtext.datasets as datasets
 import spacy
 import GPUtil
 import math
@@ -560,4 +561,77 @@ def example_simple_model():
     src_mask = torch.ones(1, 1, max_len)
     print(greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0))
 
-example_simple_model()
+# example_simple_model()
+
+# Real World Example
+
+# Data Loading, going to use Multi30k German-English Translation task
+def load_tokenizers():
+    try:
+        spacy_de = spacy.load("de_core_news_sm")
+    except IOError:
+        os.system("python3 -m spacy download de_core_news_sm")
+        spacy_de = spacy.load("de_core_news_sm")
+
+    try:
+        spacy_en = spacy.load("en_core_web_sm")
+    except IOError:
+        os.system("python3 -m spacy download en_core_web_sm")
+        spacy_en = spacy.load("en_core_web_sm")
+    
+    return spacy_de, spacy_en
+
+def tokenize(text, tokenizer):
+    return [tok.text for tok in tokenizer.tokenizer(text)]
+
+def yield_tokens(data_iter, tokenizer, index):
+    for from_to_tuple in data_iter:
+        try:
+            yield tokenizer(from_to_tuple[index])
+        except UnicodeDecodeError as e:
+            print(f"Skipping problematic line due to encoding issues: {e}")
+            continue
+
+def build_vocabulary(spacy_de, spacy_en):
+    def tokenize_de(text):
+        return tokenize(text, spacy_de)
+
+    def tokenize_en(text):
+        return tokenize(text, spacy_en)
+    
+    print('Building German Vocabulary...')
+    train, val, _ = datasets.Multi30k(language_pair=("de", "en"))
+    vocab_src = build_vocab_from_iterator(
+        yield_tokens(train + val, tokenize_de, index=0),
+        min_freq=2,
+        specials=["<s>", "</s>", "<blank>", "<unk>"]
+    )
+
+    print('Building English Vocabulary...')
+    train, val, _ = datasets.Multi30k(language_pair=("de", "en"))
+    vocab_tgt = build_vocab_from_iterator(
+        yield_tokens(train + val, tokenize_en, index=1),
+        min_freq=2,
+        specials=["<s>", "</s>", "<blank>", "<unk>"]
+    )
+
+    vocab_src.set_default_index(vocab_src["<unk>"])
+    vocab_tgt.set_default_index(vocab_tgt["<unk>"])
+
+    return vocab_src, vocab_tgt
+
+def load_vocab(spacy_de, spacy_en):
+    if not exists("vocab.pt"):
+        print('Building Vocabulary...')
+        vocab_src, vocab_tgt = build_vocabulary(spacy_de, spacy_en)
+        torch.save((vocab_src, vocab_tgt), "vocab.pt")
+    else:
+        print('Loading Vocabulary...')
+        vocab_src, vocab_tgt = torch.load("vocab.pt")
+    print("Finished.\nVocabulary sizes:")
+    print(len(vocab_src))
+    print(len(vocab_tgt))
+    return vocab_src, vocab_tgt
+
+spacy_de, spacy_en = load_tokenizers()
+vocab_src, vocab_tgt = load_vocab(spacy_de, spacy_en)
