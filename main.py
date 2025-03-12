@@ -518,7 +518,7 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
         ys = torch.cat(
             [ys, torch.zeros(1, 1).type_as(src.data).fill_(next_word)], dim=1
         )
-        return ys
+    return ys
     
 # Train the simple copy task
 def example_simple_model():
@@ -561,7 +561,7 @@ def example_simple_model():
     src_mask = torch.ones(1, 1, max_len)
     print(greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0))
 
-# example_simple_model()
+#example_simple_model()
 
 # Real World Example
 
@@ -892,10 +892,143 @@ def load_trained_model():
 model = load_trained_model()
 
 # Load Data and model for output checks
+def check_outputs(
+    valid__dataloader,
+    model,
+    vocab_src,
+    vocab_tgt,
+    n_examples=15,
+    pad_idx=2,
+    eos_string="</s>",
+):
+    results = [()] * n_examples
+    for idx in range(n_examples):
+        print("\nExample %d ========\n" % idx)
+        b = next(iter(valid__dataloader))
+        rb = Batch(b[0], b[1], pad_idx)
+        greedy_decode(model, rb.src, rb.src_mask, 64, 0)[0]
+
+        src_tokens = [
+            vocab_src.get_itos()[x] for x in rb.src[0] if x != pad_idx
+        ]
+        tgt_tokens = [
+            vocab_tgt.get_itos()[x] for x in rb.tgt[0] if x != pad_idx
+        ]
+
+        print(
+            "Source Text (Input)        : "
+            + ' '.join(src_tokens).replace("\n", "")
+        )
+        print(
+            "Target Text (Ground Truth) : "
+            + ' '.join(tgt_tokens).replace("\n", "")
+        )
+
+        model_out = greedy_decode(model, rb.src, rb.src_mask, 72, 0)[0]
+        model_txt = (
+            " ".join(
+                [vocab_tgt.get_itos()[x] for x in model_out if x != pad_idx]
+            ).split(eos_string, 1)[0]
+            + eos_string
+        )
+        print("Model Text (Output)       : " + model_txt.replace("\n", ""))
+        results[idx] = (rb, src_tokens, tgt_tokens, model_out, model_txt)
+
+    return results
+
+def run_model_example(n_examples=5):
+    global vocab_src, vocab_tgt, spacy_de, spacy_en
+
+    print("Preparing Data ...")
+    _, valid_dataloader = create_dataloaders(
+        torch.device('cpu'),
+        vocab_src,
+        vocab_tgt,
+        spacy_de,
+        spacy_en,
+        batch_size=1,
+        is_distributed=False
+    )
+
+    print("Loading Trained Model ...")
+    model = make_model(len(vocab_src), len(vocab_tgt), N=6)
+    model.load_state_dict(
+        torch.load("multi30k_model_final.pt", map_location=torch.device('cpu'))
+    )
+
+    print("Checking Model Outputs:")
+    example_data = check_outputs(
+        valid_dataloader, model, vocab_src, vocab_tgt, n_examples=n_examples
+    )
+
+    return model, example_data
+
+#run_model_example()
 
 # Attention Visualization
+def mtx2df(m, max_row, max_col, row_tokens, col_tokens):
+    "Convert a dense matrix to a data frame with row and column indices"
+    return pd.DataFrame(
+        [
+            (
+                r, c, float(m[r, c]), 
+                "%.3d %s" % (r, row_tokens[r] if len(row_tokens) > r else "<blank>"),
+                "%.3d %s" % (c, col_tokens[c] if len(col_tokens) > c else "<blank>")
+            )
+            for r in range(m.shape[0])
+            for c in range(m.shape[1])
+            if r < max_row and c < max_col
+        ],
+        # if float(m[r, c]) != 0 and r < max_row and c < max_col,
+        columns=['row', 'column', 'value', 'row_token', 'col_token'],
+    )
+
+def attn_map(attn, layer, head, row_tokens, col_tokens, max_dim=30):
+    df = mtx2df(attn[0, head].data, max_dim, max_dim, row_tokens, col_tokens)
+    return (
+        alt.Chart(data=df)
+        .mark_rect()
+        .encode(
+            x=alt.X('col_token', axis=alt.Axis(title='')),
+            y=alt.Y('row_token', axis=alt.Axis(title='')),
+            color='value',
+            tooltip=['row', 'column', 'value', 'row_token', 'col_token'],
+        )
+        .properties(height=400, width=400)
+        .interactive()
+    )
+
+def get_encoder(model, layer):
+    return model.encoder.layers[layer].self_attn.attn
+
+def get_decoder_self(model, layer):
+    return model.decoder.layers[layer].self_attn.attn
+
+def get_decoder_src(model, layer):
+    return model.decoder.layers[layer].src_attn.attn
+
+def visualize_layer(model, layer, getter_fn, ntokens, row_tokens, col_tokens):
+    attn = getter_fn(model, layer)
+    n_heads = attn.shape[1]
+    charts = [
+        attn_map(attn, 0, h, row_tokens, col_tokens, ntokens) for h in range(n_heads)
+    ]
+    assert n_heads == 8
+    return alt.vconcat(charts[0] | charts[2] | charts[4] | charts[6]).properties(title="Layer %d" % (layer + 1))
 
 # Encoder Self Attention
+def viz_encoder_self():
+    model, example_data = run_model_example(n_examples=1)
+    example = example_data[len(example_data) - 1]
+    layer_viz = [
+        visualize_layer(model, layer, get_encoder, len(example[1]), example[1], example[1])
+        for layer in range(6)
+    ]
+    return alt.hconcat(
+        layer_viz[0] & layer_viz[2] | layer_viz[4]
+    )
+
+#viz_encoder_self()
 
 # Decoder Self Attention
 
